@@ -7,3 +7,4 @@ guardrails-ai
 supabase
 pinecone-client
 cohere
+openai

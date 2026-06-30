@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Optional
 from agent import run_chat_agent, run_chat_agent_stream
 
-app = FastAPI()
+app = FastAPI(title="Amicorp AI Assistant", version="1.0.0", description="Amicorp AI RAG Assistant")
 
 # Enable CORS for frontend integration
 app.add_middleware(
