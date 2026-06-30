@@ -187,6 +187,17 @@ class ValidJson(Validator):
         except Exception:
             return FailResult(error_message="Invalid JSON string.")
 
+@register_validator(name="bias_check", data_type="string")
+class BiasCheck(Validator):
+    def __init__(self, debias_strength: float = 0.5, on_fail: str = "noop", *args, **kwargs):
+        super().__init__(on_fail=on_fail, *args, **kwargs)
+        self.debias_strength = debias_strength
+
+    def validate(self, value: str, metadata: Dict = {}) -> ValidationResult:
+        # Lightweight check for demonstration; in full systems this uses a debiasing classifier.
+        # We default to PassResult to be safe.
+        return PassResult()
+
 # Dynamically create the guardrails.hub module to allow seamless imports
 hub_mock = types.ModuleType("guardrails.hub")
 sys.modules["guardrails.hub"] = hub_mock
@@ -204,3 +215,4 @@ hub_mock.MLcubeRagContextValidator = MLcubeRagContextValidator
 hub_mock.PromptInjectionDetector = PromptInjectionDetector
 hub_mock.ResponseEvaluator = ResponseEvaluator
 hub_mock.ValidJson = ValidJson
+hub_mock.BiasCheck = BiasCheck

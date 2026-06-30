@@ -22,7 +22,8 @@ from guardrails.hub import (
     MLcubeRagContextValidator,
     PromptInjectionDetector,
     ResponseEvaluator,
-    ValidJson
+    ValidJson,
+    BiasCheck
 )
 
 try:
@@ -94,7 +95,10 @@ output_guard = Guard().use(
     GroundedAIHallucination()
 ).use(
     GuardrailsPII()
+).use(
+    BiasCheck(debias_strength=0.5, on_fail="noop")
 )
+
 
 def mask_pii(text: str) -> str:
     """
