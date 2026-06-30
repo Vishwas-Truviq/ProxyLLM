@@ -88,7 +88,7 @@ def view_conversation(conversation_id: str):
     except Exception as e:
         return {"error": str(e)}
 
-@app.delete("/delete_conversation", tags=["Admin"])
+
 @app.delete("/delete_converation", tags=["Admin"])
 def delete_conversation(conversation_id: str):
     """
