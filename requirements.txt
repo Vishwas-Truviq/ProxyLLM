@@ -7,4 +7,4 @@ guardrails-ai
 supabase
 pinecone-client
 cohere
-openai
+openai>=1.0
