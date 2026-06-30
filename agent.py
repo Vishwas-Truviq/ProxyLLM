@@ -231,8 +231,19 @@ def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
     except Exception as e:
         print(f"RAG retrieval error: {e}")
 
+    # Early fallback if no relevant context matches were found
+    if not retrieved_text_blocks:
+        fallback_msg = "I'm sorry, I don't have specific information about that in our knowledge base. Your question has been forwarded to our support team. Please contact dinesh.maddi@truviq.com for further assistance."
+        save_supabase_message(conversation_id, "assistant", fallback_msg, context=[])
+        return {
+            "response": fallback_msg,
+            "conversation_id": conversation_id,
+            "context": [],
+            "guardrail_triggered": False
+        }
+
     # Build context string
-    context_str = "\n---\n".join(retrieved_text_blocks) if retrieved_text_blocks else "No relevant context found."
+    context_str = "\n---\n".join(retrieved_text_blocks)
 
     # Build LiteLLM Messages using template
     system_instruction = CHATBOT_SYSTEM_PROMPT_TEMPLATE.format(context_str=context_str)
@@ -339,7 +350,17 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
     except Exception as e:
         print(f"RAG retrieval error in stream: {e}")
 
-    context_str = "\n---\n".join(retrieved_text_blocks) if retrieved_text_blocks else "No relevant context found."
+    # Early fallback if no relevant context matches were found
+    if not retrieved_text_blocks:
+        import json
+        fallback_msg = "I'm sorry, I don't have specific information about that in our knowledge base. Your question has been forwarded to our support team. Please contact dinesh.maddi@truviq.com for further assistance."
+        save_supabase_message(conversation_id, "assistant", fallback_msg, context=[])
+        yield f"data: {{\"conversation_id\": \"{conversation_id}\", \"is_start\": true}}\n\n"
+        yield f"data: {json.dumps({'choices': [{'delta': {'content': fallback_msg}}]})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    context_str = "\n---\n".join(retrieved_text_blocks)
     
     # Build prompts
     system_instruction = CHATBOT_SYSTEM_PROMPT_TEMPLATE.format(context_str=context_str)
