@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-dotenv
+pydantic
+litellm
+guardrails-ai
+supabase
+pinecone-client
+cohere
