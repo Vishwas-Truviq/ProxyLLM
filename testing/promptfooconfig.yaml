@@ -30,7 +30,7 @@ redteam:
     config:
       baseUrl: http://localhost:11434
     
-  numTests: 2
+  numTests: 5
 
   # Each plugin generates 5 adversarial inputs.
   # To control the number of tests for each plugin, use:
@@ -81,4 +81,4 @@ redteam:
   strategies:
     - basic # Original plugin tests without any additional strategies or optimizations
     - jailbreak:meta # Meta-agent that builds its own attack taxonomy and learns from full attack history
-    - jailbreak:composite # Combines multiple jailbreak techniques for enhanced effectiveness
+    # Combines multiple jailbreak techniques for enhanced effectiveness
