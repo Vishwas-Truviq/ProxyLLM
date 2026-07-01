@@ -1,5 +1,7 @@
 # Backend/agent.py
 import os
+import json
+import hashlib
 import requests
 import litellm
 from dotenv import load_dotenv
@@ -15,6 +17,7 @@ try:
         check_output_safety
     )
     from core.prompts import CHATBOT_SYSTEM_PROMPT_TEMPLATE
+    from services.redis_service import cache_get, cache_set, cache_delete
 except ImportError:
     from .routers.intent_router import static_response
     from .routers.model_router import choose_model
@@ -25,6 +28,7 @@ except ImportError:
         check_output_safety
     )
     from .core.prompts import CHATBOT_SYSTEM_PROMPT_TEMPLATE
+    from .services.redis_service import cache_get, cache_set, cache_delete
 
 # Load environment variables
 load_dotenv()
@@ -55,8 +59,20 @@ else:
 
 def get_cohere_embedding(text: str) -> list:
     """
-    Gets text embedding from Cohere.
+    Gets text embedding from Cohere, checking Redis cache first.
     """
+    text_to_embed = text[:512]
+    # Create md5 hash of the text to use as cache key
+    text_hash = hashlib.md5(text_to_embed.encode('utf-8')).hexdigest()
+    cache_key = f"embedding:{text_hash}"
+    
+    cached = cache_get(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception as e:
+            print(f"Error decoding cached embedding: {e}")
+            
     if not COHERE_API_KEY:
         raise ValueError("Missing COHERE_API_KEY in environment variables.")
 
@@ -66,7 +82,7 @@ def get_cohere_embedding(text: str) -> list:
         "Authorization": f"Bearer {COHERE_API_KEY}"
     }
     payload = {
-        "texts": [text[:512]],
+        "texts": [text_to_embed],
         "model": "embed-english-light-v3.0",
         "input_type": "search_query",
         "truncate": "END"
@@ -77,7 +93,12 @@ def get_cohere_embedding(text: str) -> list:
         raise Exception(f"Cohere embedding request failed with code {response.status_code}: {response.text}")
     
     data = response.json()
-    return data["embeddings"][0]
+    embedding = data["embeddings"][0]
+    
+    # Cache embedding with a 7-day TTL (604800 seconds)
+    cache_set(cache_key, json.dumps(embedding), ex_seconds=604800)
+    
+    return embedding
 
 
 def query_pinecone(vector: list, top_k: int = 5) -> list:
@@ -113,8 +134,16 @@ def query_pinecone(vector: list, top_k: int = 5) -> list:
 
 def fetch_conversation_history(conversation_id: str) -> list:
     """
-    Fetches message history for a conversation from Supabase.
+    Fetches message history for a conversation. Checks Redis cache first, falls back to Supabase.
     """
+    cache_key = f"conv_history:{conversation_id}"
+    cached = cache_get(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception as e:
+            print(f"Error decoding cached history: {e}")
+            
     if not supabase:
         return []
     
@@ -124,7 +153,11 @@ def fetch_conversation_history(conversation_id: str) -> list:
             .eq("conversation_id", conversation_id)\
             .order("created_at", desc=False)\
             .execute()
-        return res.data
+        
+        history = res.data
+        # Cache history with a 1-hour TTL (3600 seconds)
+        cache_set(cache_key, json.dumps(history), ex_seconds=3600)
+        return history
     except Exception as e:
         print(f"Error fetching conversation history: {e}")
         return []
@@ -151,20 +184,21 @@ def create_supabase_conversation(title: str = None) -> str:
 
 def save_supabase_message(conversation_id: str, role: str, content: str, context: list = None):
     """
-    Saves a message to the database.
+    Saves a message to the database and invalidates the Redis history cache.
     """
-    if not supabase:
-        return
-    
-    try:
-        supabase.table("messages").insert({
-            "conversation_id": conversation_id,
-            "role": role,
-            "content": content,
-            "context": context
-        }).execute()
-    except Exception as e:
-        print(f"Error saving message to Supabase: {e}")
+    if supabase:
+        try:
+            supabase.table("messages").insert({
+                "conversation_id": conversation_id,
+                "role": role,
+                "content": content,
+                "context": context
+            }).execute()
+        except Exception as e:
+            print(f"Error saving message to Supabase: {e}")
+            
+    # Invalidate Redis cache key
+    cache_delete(f"conv_history:{conversation_id}")
 
 
 # --- 3. Main Chat Execution (Modular Request Lifecycle) ---

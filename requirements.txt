@@ -8,3 +8,5 @@ supabase
 pinecone-client
 cohere
 openai>=1.0
+redis
+

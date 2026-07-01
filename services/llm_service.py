@@ -72,6 +72,34 @@ model_list = [
     }
 ]
 
+try:
+    from services.redis_service import redis_client
+except ImportError:
+    from .services.redis_service import redis_client
+
+# Enable LiteLLM Caching with Redis if redis is online
+if redis_client is not None:
+    try:
+        import litellm
+        from litellm import Cache
+        
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            litellm.cache = Cache(type="redis", url=redis_url)
+        else:
+            redis_host = os.getenv("REDIS_HOST", "localhost")
+            redis_port = int(os.getenv("REDIS_PORT", 6379))
+            redis_password = os.getenv("REDIS_PASSWORD", None)
+            litellm.cache = Cache(
+                type="redis",
+                host=redis_host,
+                port=redis_port,
+                password=redis_password
+            )
+        print("LiteLLM caching successfully initialized with Redis.")
+    except Exception as e:
+        print(f"Failed to initialize LiteLLM cache: {e}")
+
 router = Router(
     model_list=model_list,
     fallbacks=[
