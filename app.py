@@ -104,19 +104,4 @@ def delete_conversation(conversation_id: str):
     except Exception as e:
         return {"error": str(e)}
 
-@app.post("/clearcache", tags=["Admin"])
-@app.get("/clearcache", tags=["Admin"])
-def clear_cache():
-    """
-    Clears all cached items in Redis.
-    """
-    try:
-        from services.redis_service import redis_client
-        if not redis_client:
-            return {"status": "Error", "message": "Redis client is not configured or connected."}
-        redis_client.flushdb()
-        return {"status": "Success", "message": "All database keys successfully flushed."}
-    except Exception as e:
-        return {"status": "Error", "message": f"Failed to flush Redis cache: {str(e)}"}
-
 
