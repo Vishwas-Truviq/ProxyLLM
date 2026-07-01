@@ -78,6 +78,15 @@ except ImportError:
     from .services.redis_service import redis_client
 
 # Enable LiteLLM Caching with Redis if redis is online
+router_kwargs = {
+    "model_list": model_list,
+    "fallbacks": [
+        {"fast-tier": ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.1-flash-lite"]},
+        {"capable-tier": ["gemini-2.5-flash"]}
+    ],
+    "num_retries": 1
+}
+
 if redis_client is not None:
     try:
         import litellm
@@ -96,18 +105,14 @@ if redis_client is not None:
                 port=redis_port,
                 password=redis_password
             )
+        # Enable caching on the Router instance
+        router_kwargs["cache_responses"] = True
         print("LiteLLM caching successfully initialized with Redis.")
     except Exception as e:
         print(f"Failed to initialize LiteLLM cache: {e}")
 
-router = Router(
-    model_list=model_list,
-    fallbacks=[
-        {"fast-tier": ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.1-flash-lite"]},
-        {"capable-tier": ["gemini-2.5-flash"]}
-    ],
-    num_retries=1
-)
+router = Router(**router_kwargs)
+
 
 # 2. Instantiate Input Guard
 input_guard = Guard().use(

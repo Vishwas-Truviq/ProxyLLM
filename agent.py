@@ -298,7 +298,8 @@ def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
         response = router.completion(
             model=chosen_tier,
             messages=llm_messages,
-            temperature=0.2
+            temperature=0.2,
+            caching=True
         )
         assistant_raw_content = response.choices[0].message.content
     except Exception as e:
@@ -416,7 +417,8 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
             model=chosen_tier,
             messages=llm_messages,
             temperature=0.2,
-            stream=True
+            stream=True,
+            caching=True
         )
 
         for chunk in response_stream:
