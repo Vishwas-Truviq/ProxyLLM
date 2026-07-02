@@ -267,7 +267,7 @@ def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
 
     # Early fallback if no relevant context matches were found
     if not retrieved_text_blocks:
-        fallback_msg = "I'm sorry, I don't have specific information about that in our knowledge base. Your question has been forwarded to our support team. Please contact dinesh.maddi@truviq.com for further assistance."
+        fallback_msg = "I'm sorry, I don't have specific information about that in our knowledge base. Your question has been forwarded to our support team."
         save_supabase_message(conversation_id, "assistant", fallback_msg, context=[])
         return {
             "response": fallback_msg,
@@ -306,7 +306,7 @@ def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
         print(f"LiteLLM error: {e}")
         assistant_raw_content = (
             "I'm unable to connect to the model right now. "
-            "Please contact our support team directly at dinesh.maddi@truviq.com."
+            "Please contact our support team"
         )
 
     # 6. Output Guardrails
@@ -388,7 +388,7 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
     # Early fallback if no relevant context matches were found
     if not retrieved_text_blocks:
         import json
-        fallback_msg = "I'm sorry, I don't have specific information about that in our knowledge base. Your question has been forwarded to our support team. Please contact dinesh.maddi@truviq.com for further assistance."
+        fallback_msg = "I'm sorry, I don't have specific information about that in our knowledge base. Your question has been forwarded to our support team."
         save_supabase_message(conversation_id, "assistant", fallback_msg, context=[])
         yield f"data: {{\"conversation_id\": \"{conversation_id}\", \"is_start\": true}}\n\n"
         yield f"data: {json.dumps({'choices': [{'delta': {'content': fallback_msg}}]})}\n\n"
@@ -429,7 +429,7 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
     
     except Exception as e:
         print(f"LiteLLM streaming error: {e}")
-        error_msg = "\nI'm unable to connect to the model right now. Please contact our support team at dinesh.maddi@truviq.com."
+        error_msg = "\nI'm unable to connect to the model right now."
         full_response += error_msg
         yield f"data: {{\"choices\": [{{\"delta\": {{\"content\": {repr(error_msg)}}} }}]}}\n\n"
 
