@@ -7,13 +7,17 @@ REDIS_URL = os.getenv("REDIS_URL")
 REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+DISABLE_REDIS = os.getenv("DISABLE_REDIS", "").lower() in {"1", "true", "yes", "on"}
+ENABLE_REDIS = os.getenv("ENABLE_REDIS")
 
 redis_client = None
 
 # Determine if we should attempt connection
 # Check if REDIS_URL is set, or if REDIS_HOST is set. 
 # In local development where neither is configured, we bypass connection entirely to avoid delay.
-if REDIS_URL or REDIS_HOST:
+if DISABLE_REDIS or (ENABLE_REDIS is not None and ENABLE_REDIS.lower() not in {"1", "true", "yes", "on"}):
+    print("Redis disabled by environment. Caching is DISABLED.")
+elif REDIS_URL or REDIS_HOST:
     try:
         if REDIS_URL:
             print(f"Connecting to Redis via REDIS_URL...")

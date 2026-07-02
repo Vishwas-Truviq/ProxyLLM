@@ -1,5 +1,6 @@
 import os
 import re
+import litellm
 from litellm import Router
 
 # Force registration/mocking of custom validators from our guardrails_service first
@@ -65,6 +66,10 @@ def _entry(model_name: str, model: str, key_env: str, rpm: int | None = None) ->
     entry: dict = {
         "model_name": model_name,
         "litellm_params": {"model": model, "api_key": key},
+        "model_info": {
+            "cache_creation_input_token_cost": 0.0,
+            "cache_read_input_token_cost": 0.0,
+        },
     }
     if rpm is not None:
         entry["rpm"] = rpm
@@ -78,12 +83,13 @@ def _entry(model_name: str, model: str, key_env: str, rpm: int | None = None) ->
 _FAST = [
     # Groq — dedicated inference hardware, lowest latency in the fleet
     # NOTE: gemma2-9b-it was decommissioned by Groq (2025); replaced with llama-3.2-11b.
+    #1
     _entry("fast-tier", "groq/llama-3.1-8b-instant",          "GROQ_API_KEY_1", rpm=30),
-    _entry("fast-tier", "groq/llama-3.2-11b-vision-preview",  "GROQ_API_KEY_1", rpm=30),
-    _entry("fast-tier", "groq/llama-3.2-3b-preview",          "GROQ_API_KEY_1", rpm=30),
+    #_entry("fast-tier", "groq/llama-3.2-11b-vision-preview",  "GROQ_API_KEY_1", rpm=30),
+    #_entry("fast-tier", "groq/llama-3.2-3b-preview",          "GROQ_API_KEY_1", rpm=30),
     _entry("fast-tier", "groq/llama-3.1-8b-instant",          "GROQ_API_KEY_2", rpm=30),
-    _entry("fast-tier", "groq/llama-3.2-11b-vision-preview",  "GROQ_API_KEY_2", rpm=30),
-    _entry("fast-tier", "groq/llama-3.2-3b-preview",          "GROQ_API_KEY_2", rpm=30),
+    #_entry("fast-tier", "groq/llama-3.2-11b-vision-preview",  "GROQ_API_KEY_2", rpm=30),
+    #_entry("fast-tier", "groq/llama-3.2-3b-preview",          "GROQ_API_KEY_2", rpm=30),
     # OpenRouter — confirmed free-tier models only
     # NOTE: liquid/lfm-40b:free removed — free availability unconfirmed.
     _entry("fast-tier", "openrouter/meta-llama/llama-3.1-8b-instruct:free", "OPENROUTER_API_KEY_1", rpm=20),
@@ -104,12 +110,12 @@ _FAST = [
 _CAPABLE = [
     # Groq 70B — fastest large-model inference available
     _entry("capable-tier", "groq/llama-3.3-70b-versatile",       "GROQ_API_KEY_1", rpm=30),
-    _entry("capable-tier", "groq/deepseek-r1-distill-llama-70b", "GROQ_API_KEY_1", rpm=30),
-    _entry("capable-tier", "groq/qwen-qwq-32b",                  "GROQ_API_KEY_1", rpm=30),
-    _entry("capable-tier", "groq/meta-llama/llama-4-maverick-17b-128e-instruct", "GROQ_API_KEY_1", rpm=30),
+    #_entry("capable-tier", "groq/deepseek-r1-distill-llama-70b", "GROQ_API_KEY_1", rpm=30),
+    #_entry("capable-tier", "groq/qwen-qwq-32b",                  "GROQ_API_KEY_1", rpm=30),
+    _entry("capable-tier", "groq/meta-llama/llama-4-scout-17b-16e-instruct", "GROQ_API_KEY_1", rpm=30),
     _entry("capable-tier", "groq/llama-3.3-70b-versatile",       "GROQ_API_KEY_2", rpm=30),
-    _entry("capable-tier", "groq/deepseek-r1-distill-llama-70b", "GROQ_API_KEY_2", rpm=30),
-    _entry("capable-tier", "groq/qwen-qwq-32b",                  "GROQ_API_KEY_2", rpm=30),
+    #_entry("capable-tier", "groq/deepseek-r1-distill-llama-70b", "GROQ_API_KEY_2", rpm=30),
+    #_entry("capable-tier", "groq/qwen-qwq-32b",                  "GROQ_API_KEY_2", rpm=30),
     # OpenRouter — confirmed free-tier models only
     # NOTE: qwen3-235b-a22b:free removed — OpenRouter confirmed it is NOT free (404).
     _entry("capable-tier", "openrouter/deepseek/deepseek-chat-v3-0324:free",       "OPENROUTER_API_KEY_1", rpm=20),
@@ -133,9 +139,9 @@ _CAPABLE = [
 _SAFETY = [
     # Groq 70B — best instruction-following + lowest latency for a large model
     _entry("safety-tier", "groq/llama-3.3-70b-versatile",       "GROQ_API_KEY_1", rpm=30),
-    _entry("safety-tier", "groq/deepseek-r1-distill-llama-70b", "GROQ_API_KEY_1", rpm=30),
+    #_entry("safety-tier", "groq/deepseek-r1-distill-llama-70b", "GROQ_API_KEY_1", rpm=30),
     _entry("safety-tier", "groq/llama-3.3-70b-versatile",       "GROQ_API_KEY_2", rpm=30),
-    _entry("safety-tier", "groq/deepseek-r1-distill-llama-70b", "GROQ_API_KEY_2", rpm=30),
+    #_entry("safety-tier", "groq/deepseek-r1-distill-llama-70b", "GROQ_API_KEY_2", rpm=30),
     # OpenRouter — confirmed free-tier only
     # NOTE: qwen3-235b-a22b:free removed — NOT free (OpenRouter 404).
     _entry("safety-tier", "openrouter/deepseek/deepseek-chat-v3-0324:free",       "OPENROUTER_API_KEY_1", rpm=20),
@@ -162,6 +168,16 @@ _tier_counts = {
 print(
     f"LiteLLM Router: loaded {len(model_list)} deployments — "
     + ", ".join(f"{t}: {n}" for t, n in _tier_counts.items())
+)
+
+litellm.register_model(
+    {
+        e["litellm_params"]["model"]: {
+            "cache_creation_input_token_cost": 0.0,
+            "cache_read_input_token_cost": 0.0,
+        }
+        for e in model_list
+    }
 )
 
 try:
