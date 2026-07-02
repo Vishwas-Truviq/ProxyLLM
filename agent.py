@@ -4,7 +4,7 @@ import json
 import hashlib
 import requests
 import litellm
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from supabase import create_client, Client
 
 try:
@@ -30,8 +30,12 @@ except ImportError:
     from .core.prompts import CHATBOT_SYSTEM_PROMPT_TEMPLATE
     from .services.redis_service import cache_get, cache_set, cache_delete
 
-# Load environment variables
-load_dotenv()
+# Load environment variables. Use find_dotenv() so this resolves the SAME
+# .env file regardless of the working directory the app is launched from —
+# previously a bare load_dotenv() could silently pick up a different/stale
+# .env than the one the ingestion script (setup_dev_rag.py) writes
+# PINECONE_HOST into, causing the agent to query a wrong/deleted index.
+load_dotenv(find_dotenv(usecwd=True))
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -40,9 +44,27 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX = os.getenv("PINECONE_INDEX", "amicorp-kb")
 PINECONE_HOST = os.getenv("PINECONE_HOST", "amicorp-kb-ot25xdb.svc.aped-4627-b74a.pinecone.io")
 
+# Support contact shown to users when context is unavailable.
+# Override via SUPPORT_EMAIL env var without a code deploy.
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "support@amicorp.com")
+
+if not PINECONE_HOST:
+    print(
+        "Warning: PINECONE_HOST not found in environment. Falling back to a "
+        "hardcoded default host, which may be stale. Re-run the ingestion "
+        "script and confirm .env is being loaded from the correct path."
+    )
+
 # Configure LiteLLM
-litellm.api_base = os.getenv("LITELLM_API_BASE", "http://localhost:4000")
-litellm.api_key = os.getenv("LITELLM_API_KEY", "your-litellm-proxy-key")
+# Only override api_base and api_key globally if they are explicitly provided in the environment.
+# Otherwise, we allow LiteLLM to connect directly to the respective API providers (e.g. Groq, Gemini).
+litellm_api_base = os.getenv("LITELLM_API_BASE")
+if litellm_api_base:
+    litellm.api_base = litellm_api_base
+
+litellm_api_key = os.getenv("LITELLM_API_KEY")
+if litellm_api_key:
+    litellm.api_key = litellm_api_key
 
 # Initialize Supabase Client
 supabase: Client = None
@@ -55,24 +77,53 @@ else:
     print("Supabase URL or Key not set. Running in local-only / fallback mode.")
 
 
+# --- 0. Shared: non-deterministic "no context found" instruction ---
+# Used when RAG retrieval comes back empty. Rather than always returning the
+# exact same canned string (robotic, and a tell for anyone probing the
+# bot's limits), we route through the LLM with a strict "don't invent facts"
+# instruction so the reply is natural and varies turn to turn. The hardcoded
+# string is kept only as a last-resort fallback if this LLM call itself fails.
+NO_CONTEXT_SYSTEM_INSTRUCTION = (
+    "The user asked a question, but nothing relevant was found in Amicorp's "
+    "knowledge base for it. Do NOT invent or guess specific facts about "
+    "Amicorp's entities, jurisdictions, fees, or services. Instead, briefly "
+    "and naturally let the user know you don't have specific information on "
+    "this in your knowledge base, and offer to connect them with the support "
+    "team or ask a clarifying question if their request seems ambiguous. "
+    "Keep it warm and conversational, not robotic."
+)
+
+HARDCODED_FALLBACK_MSG = (
+    "I'm sorry, I don't have specific information about that in our "
+    "knowledge base. Please reach out to our support team at "
+    f"{SUPPORT_EMAIL} and we'll be happy to help."
+)
+
+
 # --- 1. RAG Logic (Cohere + Pinecone) ---
 
 def get_cohere_embedding(text: str) -> list:
     """
     Gets text embedding from Cohere, checking Redis cache first.
     """
-    text_to_embed = text[:512]
+    # NOTE: no manual [:512] character slice here. Cohere's embed model
+    # truncates at 512 *tokens* (roughly 2000+ characters for English text),
+    # and the request payload already sets truncate="END" to handle any
+    # genuine overflow safely. Pre-slicing at 512 characters was cutting
+    # long user questions off a quarter of the way through.
+    text_to_embed = text
+
     # Create md5 hash of the text to use as cache key
     text_hash = hashlib.md5(text_to_embed.encode('utf-8')).hexdigest()
     cache_key = f"embedding:{text_hash}"
-    
+
     cached = cache_get(cache_key)
     if cached:
         try:
             return json.loads(cached)
         except Exception as e:
             print(f"Error decoding cached embedding: {e}")
-            
+
     if not COHERE_API_KEY:
         raise ValueError("Missing COHERE_API_KEY in environment variables.")
 
@@ -91,13 +142,13 @@ def get_cohere_embedding(text: str) -> list:
     response = requests.post(url, json=payload, headers=headers)
     if response.status_code != 200:
         raise Exception(f"Cohere embedding request failed with code {response.status_code}: {response.text}")
-    
+
     data = response.json()
     embedding = data["embeddings"][0]
-    
+
     # Cache embedding with a 7-day TTL (604800 seconds)
     cache_set(cache_key, json.dumps(embedding), ex_seconds=604800)
-    
+
     return embedding
 
 
@@ -111,7 +162,7 @@ def query_pinecone(vector: list, top_k: int = 5) -> list:
     # Standardize host URL
     host = PINECONE_HOST.replace("https://", "").replace("http://", "")
     url = f"https://{host}/query"
-    
+
     headers = {
         "Content-Type": "application/json",
         "Api-Key": PINECONE_API_KEY
@@ -125,7 +176,7 @@ def query_pinecone(vector: list, top_k: int = 5) -> list:
     response = requests.post(url, json=payload, headers=headers)
     if response.status_code != 200:
         raise Exception(f"Pinecone query request failed with code {response.status_code}: {response.text}")
-    
+
     data = response.json()
     return data.get("matches", [])
 
@@ -143,17 +194,17 @@ def fetch_conversation_history(conversation_id: str) -> list:
             return json.loads(cached)
         except Exception as e:
             print(f"Error decoding cached history: {e}")
-            
+
     if not supabase:
         return []
-    
+
     try:
         res = supabase.table("messages")\
             .select("role", "content")\
             .eq("conversation_id", conversation_id)\
             .order("created_at", desc=False)\
             .execute()
-        
+
         history = res.data
         # Cache history with a 1-hour TTL (3600 seconds)
         cache_set(cache_key, json.dumps(history), ex_seconds=3600)
@@ -170,14 +221,14 @@ def create_supabase_conversation(title: str = None) -> str:
     if not supabase:
         import uuid
         return str(uuid.uuid4())
-    
+
     try:
         res = supabase.table("conversations").insert({"title": title}).execute()
         if res.data:
             return res.data[0]["id"]
     except Exception as e:
         print(f"Error creating conversation: {e}")
-    
+
     import uuid
     return str(uuid.uuid4())
 
@@ -196,12 +247,33 @@ def save_supabase_message(conversation_id: str, role: str, content: str, context
             }).execute()
         except Exception as e:
             print(f"Error saving message to Supabase: {e}")
-            
+
     # Invalidate Redis cache key
     cache_delete(f"conv_history:{conversation_id}")
 
 
 # --- 3. Main Chat Execution (Modular Request Lifecycle) ---
+
+def is_vague_or_unstructured(text: str) -> bool:
+    """
+    Checks if a user query is vague, empty, or consists only of symbols/punctuation
+    (e.g., '**', '?', '...', '*', etc.) that do not carry semantic meaning.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+
+    # 1. Check if it contains zero alphanumeric characters (only punctuation/symbols)
+    import re
+    if not re.search(r'[a-zA-Z0-9]', cleaned):
+        return True
+
+    # 2. Check if the query is too short to carry meaning (less than 2 characters)
+    if len(cleaned) < 2:
+        return True
+
+    return False
+
 
 def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
     """
@@ -217,12 +289,26 @@ def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
     """
     # 1. PII Masking and Input Safety Guardrail
     masked_message = mask_pii(user_message)
-    
-    is_new = False
+
     if not conversation_id:
         conversation_id = create_supabase_conversation(masked_message[:60])
-        is_new = True
-        
+
+    # Check if the query is vague/unstructured (e.g. '**', '?', etc.) before doing safety/RAG/LLM calls.
+    if is_vague_or_unstructured(masked_message):
+        clarification_msg = (
+            "I'm sorry, I couldn't understand your message. "
+            "Could you please specify your query or describe what "
+            "corporate service or structure you are looking for?"
+        )
+        save_supabase_message(conversation_id, "user", masked_message)
+        save_supabase_message(conversation_id, "assistant", clarification_msg, context=[])
+        return {
+            "response": clarification_msg,
+            "conversation_id": conversation_id,
+            "context": [],
+            "guardrail_triggered": False
+        }
+
     past_messages = fetch_conversation_history(conversation_id)
     history_list = [{"role": msg["role"], "content": msg["content"]} for msg in past_messages]
 
@@ -265,9 +351,31 @@ def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
     except Exception as e:
         print(f"RAG retrieval error: {e}")
 
-    # Early fallback if no relevant context matches were found
+    # Early fallback if no relevant context matches were found.
+    # Instead of always returning the same hardcoded string, route through
+    # the LLM with an instruction not to fabricate specifics, so the reply
+    # is natural and varies across turns. Hardcoded string is the last-resort
+    # fallback if this call itself errors out.
     if not retrieved_text_blocks:
-        fallback_msg = "I'm sorry, I don't have specific information about that in our knowledge base. Your question has been forwarded to our support team."
+        fallback_messages = [{"role": "system", "content": NO_CONTEXT_SYSTEM_INSTRUCTION}]
+        for msg in history_list:
+            fallback_messages.append({"role": msg["role"], "content": msg["content"]})
+        fallback_messages.append({"role": "user", "content": masked_message})
+
+        try:
+            chosen_tier = choose_model(masked_message)
+            from services.llm_service import router
+            response = router.completion(
+                model=chosen_tier,
+                messages=fallback_messages,
+                temperature=0.7,  # more natural variation than the RAG-grounded 0.2
+                caching=False,    # don't let LiteLLM cache "no context" replies verbatim
+            )
+            fallback_msg = response.choices[0].message.content
+        except Exception as e:
+            print(f"LiteLLM error on no-context fallback: {e}")
+            fallback_msg = HARDCODED_FALLBACK_MSG
+
         save_supabase_message(conversation_id, "assistant", fallback_msg, context=[])
         return {
             "response": fallback_msg,
@@ -280,14 +388,17 @@ def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
     context_str = "\n---\n".join(retrieved_text_blocks)
 
     # Build LiteLLM Messages using template
-    system_instruction = CHATBOT_SYSTEM_PROMPT_TEMPLATE.format(context_str=context_str)
+    system_instruction = CHATBOT_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=context_str,
+        support_email=SUPPORT_EMAIL
+    )
 
     llm_messages = [{"role": "system", "content": system_instruction}]
-    
+
     # Add history
     for msg in history_list:
         llm_messages.append({"role": msg["role"], "content": msg["content"]})
-    
+
     # Add current user message
     llm_messages.append({"role": "user", "content": masked_message})
 
@@ -309,10 +420,20 @@ def run_chat_agent(user_message: str, conversation_id: str = None) -> dict:
             "Please contact our support team"
         )
 
-    # 6. Output Guardrails
+    # 6. Output Guardrails.
+    # NOTE: previously this branch returned early WITHOUT saving anything to
+    # Supabase, which left a user message in the DB with no assistant reply
+    # — breaking the message list built for the LLM on the next turn. Now
+    # saves a placeholder, matching the streaming version's behavior.
     if not check_output_safety(assistant_raw_content):
+        blocked_msg = "I generated a response that violates my safety guidelines, so I cannot present it to you."
+        save_supabase_message(
+            conversation_id, "assistant",
+            "Response blocked due to safety guidelines violation.",
+            context=[]
+        )
         return {
-            "response": "I generated a response that violates my safety guidelines, so I cannot present it to you.",
+            "response": blocked_msg,
             "conversation_id": conversation_id,
             "context": [],
             "guardrail_triggered": True
@@ -348,13 +469,27 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
     # Setup/Fetch Conversation Session
     if not conversation_id:
         conversation_id = create_supabase_conversation(masked_message[:60])
-    
+
+    # Check if the query is vague/unstructured (e.g. '**', '?', etc.) before doing safety/RAG/LLM calls.
+    if is_vague_or_unstructured(masked_message):
+        clarification_msg = (
+            "I'm sorry, I couldn't understand your message. "
+            "Could you please specify your query or describe what "
+            "corporate service or structure you are looking for?"
+        )
+        save_supabase_message(conversation_id, "user", masked_message)
+        save_supabase_message(conversation_id, "assistant", clarification_msg, context=[])
+        yield f"data: {json.dumps({'conversation_id': conversation_id, 'is_start': True})}\n\n"
+        yield f"data: {json.dumps({'choices': [{'delta': {'content': clarification_msg}}]})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
     past_messages = fetch_conversation_history(conversation_id)
     history_list = [{"role": msg["role"], "content": msg["content"]} for msg in past_messages]
 
     is_safe, risk_level = check_input_safety(masked_message, history_list)
     if not is_safe:
-        yield f"data: {{\"error\": \"I cannot fulfill this request. It violates my safety guidelines.\", \"guardrail_triggered\": true}}\n\n"
+        yield f"data: {json.dumps({'error': 'I cannot fulfill this request. It violates my safety guidelines.', 'guardrail_triggered': True})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
@@ -365,8 +500,8 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
     static_reply = static_response(masked_message)
     if static_reply is not None:
         save_supabase_message(conversation_id, "assistant", static_reply, context=[])
-        yield f"data: {{\"conversation_id\": \"{conversation_id}\", \"is_start\": true}}\n\n"
-        yield f"data: {{\"choices\": [{{\"delta\": {{\"content\": {repr(static_reply)}}} }}]}}\n\n"
+        yield f"data: {json.dumps({'conversation_id': conversation_id, 'is_start': True})}\n\n"
+        yield f"data: {json.dumps({'choices': [{'delta': {'content': static_reply}}]})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
@@ -385,20 +520,50 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
     except Exception as e:
         print(f"RAG retrieval error in stream: {e}")
 
-    # Early fallback if no relevant context matches were found
+    # Early fallback if no relevant context matches were found.
+    # Same non-deterministic approach as the non-streaming path: stream the
+    # LLM's own natural reply rather than always emitting the identical
+    # canned string.
     if not retrieved_text_blocks:
-        import json
-        fallback_msg = "I'm sorry, I don't have specific information about that in our knowledge base. Your question has been forwarded to our support team."
-        save_supabase_message(conversation_id, "assistant", fallback_msg, context=[])
-        yield f"data: {{\"conversation_id\": \"{conversation_id}\", \"is_start\": true}}\n\n"
-        yield f"data: {json.dumps({'choices': [{'delta': {'content': fallback_msg}}]})}\n\n"
+        fallback_messages = [{"role": "system", "content": NO_CONTEXT_SYSTEM_INSTRUCTION}]
+        for msg in history_list:
+            fallback_messages.append({"role": msg["role"], "content": msg["content"]})
+        fallback_messages.append({"role": "user", "content": masked_message})
+
+        yield f"data: {json.dumps({'conversation_id': conversation_id, 'is_start': True})}\n\n"
+
+        full_fallback = ""
+        try:
+            chosen_tier = choose_model(masked_message)
+            from services.llm_service import router
+            response_stream = router.completion(
+                model=chosen_tier,
+                messages=fallback_messages,
+                temperature=0.7,
+                stream=True,
+                caching=False,
+            )
+            for chunk in response_stream:
+                content = chunk.choices[0].delta.content or ""
+                if content:
+                    full_fallback += content
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': content}}]})}\n\n"
+        except Exception as e:
+            print(f"LiteLLM error on no-context fallback stream: {e}")
+            full_fallback = HARDCODED_FALLBACK_MSG
+            yield f"data: {json.dumps({'choices': [{'delta': {'content': full_fallback}}]})}\n\n"
+
+        save_supabase_message(conversation_id, "assistant", full_fallback, context=[])
         yield "data: [DONE]\n\n"
         return
 
     context_str = "\n---\n".join(retrieved_text_blocks)
-    
+
     # Build prompts
-    system_instruction = CHATBOT_SYSTEM_PROMPT_TEMPLATE.format(context_str=context_str)
+    system_instruction = CHATBOT_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=context_str,
+        support_email=SUPPORT_EMAIL
+    )
 
     llm_messages = [{"role": "system", "content": system_instruction}]
     for msg in history_list:
@@ -409,7 +574,7 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
     full_response = ""
     try:
         # Yield metadata block first to let client know session parameters
-        yield f"data: {{\"conversation_id\": \"{conversation_id}\", \"is_start\": true}}\n\n"
+        yield f"data: {json.dumps({'conversation_id': conversation_id, 'is_start': True})}\n\n"
 
         chosen_tier = choose_model(masked_message)
         from services.llm_service import router
@@ -425,18 +590,18 @@ def run_chat_agent_stream(user_message: str, conversation_id: str = None):
             content = chunk.choices[0].delta.content or ""
             if content:
                 full_response += content
-                yield f"data: {{\"choices\": [{{\"delta\": {{\"content\": {repr(content)}}} }}]}}\n\n"
-    
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': content}}]})}\n\n"
+
     except Exception as e:
         print(f"LiteLLM streaming error: {e}")
         error_msg = "\nI'm unable to connect to the model right now."
         full_response += error_msg
-        yield f"data: {{\"choices\": [{{\"delta\": {{\"content\": {repr(error_msg)}}} }}]}}\n\n"
+        yield f"data: {json.dumps({'choices': [{'delta': {'content': error_msg}}]})}\n\n"
 
     # 6. Output Guardrail on full assembled response
     if not check_output_safety(full_response):
         warning_msg = "\n[ERROR: This response violates safety guidelines and has been blocked.]"
-        yield f"data: {{\"choices\": [{{\"delta\": {{\"content\": {repr(warning_msg)}}} }}], \"guardrail_triggered\": true}}\n\n"
+        yield f"data: {json.dumps({'choices': [{'delta': {'content': warning_msg}}], 'guardrail_triggered': True})}\n\n"
         save_supabase_message(conversation_id, "assistant", "Response blocked due to safety guidelines violation.", context=[])
     else:
         # Save Assistant response to Supabase
